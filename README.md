@@ -34,28 +34,35 @@
 
 插件是标准的 DSH bundle，同时带 host 半（`index.js`）和 client 半（`client.js`）。
 
-### 方式 A：从 npm
+> 命令里的 `<profile>` 换成你要装的 profile 名；桌面版就是 `desktop`。
+> `dsh plugin` 会把参数原样转给 pnpm，所以任何 pnpm 能装的 spec 都行。
+
+### 方式 A：从 GitHub 直装（推荐，当前唯一可直接用的一键方式）
 
 ```bash
-dsh plugin install dsh-token-monitor
+dsh plugin --profile <profile> add github:Ta9y/dsh-token-monitor
 ```
 
-或用图形界面：**设置 → 插件 → 安装**，输入 `dsh-token-monitor`。
+### 方式 B：图形界面
 
-### 方式 B：直接从 GitHub
+**设置 → 插件 → 安装**，粘贴 `github:Ta9y/dsh-token-monitor`。
 
-```bash
-dsh plugin install github:Ta9y/dsh-token-monitor
-```
-
-### 方式 C：手动（适合本地调试）
+### 方式 C：手动（适合本地开发调试）
 
 ```powershell
 cd $HOME\.dsh\profiles\desktop
 pnpm add file:C:/path/to/dsh-token-monitor
 ```
 
-然后把 `dsh-token-monitor` 加进该目录 `package.json` 的 `dsh.profile.bundles` 数组，重启 DSH。
+然后把 `dsh-token-monitor` 加进该目录 `package.json` 的 `dsh.profile.bundles` 数组。
+
+### 方式 D：从 npm
+
+> ⚠️ **尚未发布到 npm**，这条命令现在会 404。等发布后可用：
+>
+> ```bash
+> dsh plugin --profile <profile> add dsh-token-monitor
+> ```
 
 > 安装后**需要重启一次 DSH 进程**：host 半的代码走 ESM 缓存，重载插件不会重新执行。
 > 之后改 `ui.js` / `config.json` 只要刷新页面即可。
