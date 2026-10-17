@@ -1,0 +1,9 @@
+# dsh-token-monitor bundle patch
+#
+# 注意 cordis patch 的两种语义（见 @deepseek-ai/dsh-app-boot 的 applyEntryPatches）：
+#   - id + config  -> 覆盖「已存在」条目的配置；条目不存在只会 warn 然后跳过
+#   - insert       -> 真正插入新条目（不带 id 时插到顶层）
+# 所以插入新插件必须走 insert，不能写 `- id: xxx`。
+- insert:
+    - id: dsh-token-monitor
+      name: 'dsh-token-monitor'

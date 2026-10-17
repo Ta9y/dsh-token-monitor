@@ -1,0 +1,18 @@
+{
+  "pollSeconds": 10,
+  "balanceSeconds": 60,
+  "autoPrices": true,
+  "searchPer1000": 5,
+  "fetchPer1000": 5,
+  "searchBillingFrom": "2026-11-01",
+  "prices": {
+    "deepseek-flash": {
+      "offpeak": { "cacheHit": 0.02, "cacheMiss": 1, "output": 4 },
+      "peak": { "cacheHit": 0.04, "cacheMiss": 2, "output": 8 }
+    },
+    "deepseek-v4-pro": {
+      "offpeak": { "cacheHit": 0.15, "cacheMiss": 4.5, "output": 13.5 },
+      "peak": { "cacheHit": 0.3, "cacheMiss": 9, "output": 27 }
+    }
+  }
+}

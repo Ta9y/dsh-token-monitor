@@ -1,0 +1,17 @@
+# 运行时产物，不要提交
+debug.log
+token.txt
+prices.auto.json
+
+# 依赖
+node_modules/
+
+# 打包产物
+*.tgz
+*.zip
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

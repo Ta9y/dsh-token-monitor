@@ -1,0 +1,59 @@
+{
+  "name": "dsh-token-monitor",
+  "version": "1.0.0",
+  "description": "Floating token & cost monitor for DeepSeek Harness: account balance, per-conversation token spend, and cost estimated with DeepSeek's official peak/off-peak rates.",
+  "keywords": [
+    "dsh-plugin",
+    "dsh",
+    "deepseek-harness",
+    "deepseek",
+    "plugin",
+    "token",
+    "cost",
+    "balance",
+    "monitor",
+    "floating-window"
+  ],
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "ui.js",
+    "cordis.patch.yml",
+    "config.json",
+    "README.md",
+    "README.en.md",
+    "LICENSE"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [],
+      "external": []
+    }
+  },
+  "scripts": {
+    "test": "node test/smoke.mjs",
+    "test:prices": "node test/prices.mjs"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Ta9y/dsh-token-monitor.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Ta9y/dsh-token-monitor/issues"
+  },
+  "homepage": "https://github.com/Ta9y/dsh-token-monitor#readme"
+}
