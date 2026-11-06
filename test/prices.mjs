@@ -1,11 +1,14 @@
 // 用真实的官方价目页验证 parsePrices：抓一次 → 解析 → 打印结果
 // 运行：node test/prices.mjs
 import { pathToFileURL } from 'node:url'
+import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
-const PKG = path.join(HERE, '..')
+// 工作区（test/ 在仓库根）和发布快照（test/ 在包内）两种布局都支持
+const PARENT = path.join(HERE, '..')
+const PKG = fs.existsSync(path.join(PARENT, 'package.json')) ? PARENT : path.join(PARENT, 'dsh-token-monitor')
 const plugin = await import(pathToFileURL(path.join(PKG, 'index.js')).href)
 
 const URL_SRC = 'https://api-docs.deepseek.com/zh-cn/quick_start/pricing/'

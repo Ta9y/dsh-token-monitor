@@ -264,6 +264,17 @@ function emptyBucket() {
 }
 
 function sumUsage(session) {
+  let events = []
+  try {
+    events = session.ownEvents()
+  } catch {
+    events = []
+  }
+  return sumUsageEvents(events)
+}
+
+// 纯事件版本：从持久化日志里读回来的"冷会话"没有 Session 对象，也走这里累加。
+function sumUsageEvents(events) {
   const total = {
     input: 0,
     output: 0,
@@ -277,7 +288,6 @@ function sumUsage(session) {
     peak: emptyBucket(),
     offpeak: emptyBucket(),
   }
-  const events = session.ownEvents()
   for (const event of events) {
     if (!event) continue
 
@@ -343,8 +353,20 @@ export function apply(ctx, config = {}) {
     activeSessionId: null,
     activeTitle: '',
     lastActivityId: null,
-    tokensKey: '',
-    tokens: null,
+    // 每个会话的用量快照：id -> { key, withContext, value }
+    stats: new Map(),
+    // 已销毁会话的最后一次成绩，会话消失后仍能计入汇总
+    finalStats: new Map(),
+    // 父会话 -> 子会话（子智能体会话被销毁后关系仍然保留）
+    childrenOf: new Map(),
+    // 持久化谱系（sessionQuery.traceSession）算出来的父子关系，重启后依然有效
+    corpusChildren: new Map(),
+    corpusFor: '',
+    corpusAt: 0,
+    corpusBusy: null,
+    corpusSource: 'none',
+    // 已经从持久化日志里补过用量的冷会话 id
+    coldLoaded: new Set(),
   }
 
   function clientMetadata() {
@@ -459,21 +481,14 @@ export function apply(ctx, config = {}) {
     return hit ? textOf(hit.id) : null
   }
 
-  function sessionUsage(sessionId) {
-    const id = textOf(sessionId)
+  // 统计单个会话。withContext 只在主会话上用：上下文占用要跑 tokenMeter，
+  // 子会话没必要每个轮询都算一遍。
+  function measureSession(session, withContext, knownId) {
+    const id = textOf(session.id) || textOf(knownId)
     if (!id) return null
-    const sessions = ctx.get('sessions')
-    if (!sessions) return { id, live: false }
-    let session
-    try {
-      session = sessions.get(id)
-    } catch {
-      session = undefined
-    }
-    if (!session) return { id, live: false }
-
-    const key = id + ':' + textOf(session.seq)
-    if (cache.tokensKey === key && cache.tokens) return cache.tokens
+    const key = id + ':' + textOf(session.seq) + (withContext ? ':ctx' : '')
+    const cached = cache.stats.get(id)
+    if (cached && cached.key === key) return cached.value
 
     let usage = null
     try {
@@ -483,12 +498,14 @@ export function apply(ctx, config = {}) {
     }
 
     let contextTokens = null
-    const meter = ctx.get('tokenMeter')
-    if (meter) {
-      try {
-        contextTokens = meter.measure(session).totalTokens
-      } catch {
-        contextTokens = null
+    if (withContext) {
+      const meter = ctx.get('tokenMeter')
+      if (meter) {
+        try {
+          contextTokens = meter.measure(session).totalTokens
+        } catch {
+          contextTokens = null
+        }
       }
     }
 
@@ -509,6 +526,7 @@ export function apply(ctx, config = {}) {
       id,
       live: true,
       createdAt: Number(header.createdAt) || null,
+      parentId: header.parentSession ? textOf(header.parentSession) : null,
       subagent: header.origin === 'subagent',
       input: usage ? usage.input : 0,
       output: usage ? usage.output : 0,
@@ -517,8 +535,8 @@ export function apply(ctx, config = {}) {
       cacheRead: usage ? usage.cacheRead : 0,
       cacheWrite: usage ? usage.cacheWrite : 0,
       // 按发生时刻分桶的用量：页面用各自时段的单价折算，比"全按当前时段"准
-      peak: usage ? usage.peak : null,
-      offpeak: usage ? usage.offpeak : null,
+      peak: usage ? usage.peak : emptyBucket(),
+      offpeak: usage ? usage.offpeak : emptyBucket(),
       searches: usage ? usage.searches : 0,
       fetches: usage ? usage.fetches : 0,
       context: contextTokens,
@@ -527,10 +545,40 @@ export function apply(ctx, config = {}) {
       title: titleOf(session),
       measured: true,
     }
-    cache.tokensKey = key
-    cache.tokens = value
+    cache.stats.set(id, { key, value })
     return value
   }
+
+  function sessionUsage(sessionId) {
+    const id = textOf(sessionId)
+    if (!id) return null
+    const sessions = ctx.get('sessions')
+    if (!sessions) return { id, live: false }
+    let session
+    try {
+      session = sessions.get(id)
+    } catch {
+      session = undefined
+    }
+    if (!session) return { id, live: false }
+    return measureSession(session, false, id)
+  }
+
+  function mainStats(sessionId) {
+    const id = textOf(sessionId)
+    if (!id) return null
+    const sessions = ctx.get('sessions')
+    if (!sessions) return null
+    let session
+    try {
+      session = sessions.get(id)
+    } catch {
+      session = undefined
+    }
+    if (!session) return null
+    return measureSession(session, true, id)
+  }
+
 
   function resolveActiveId() {
     const sessions = ctx.get('sessions')
@@ -548,6 +596,369 @@ export function apply(ctx, config = {}) {
     return candidates.length > 0 ? candidates[0] : null
   }
 
+  // ---- 任务级汇总（主会话 + 子智能体 + 智能体团队） --------------------------
+
+  function emptyTotals() {
+    return {
+      input: 0,
+      output: 0,
+      total: 0,
+      calls: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+      searches: 0,
+      fetches: 0,
+      peak: emptyBucket(),
+      offpeak: emptyBucket(),
+    }
+  }
+
+  function addInto(target, value) {
+    if (!value) return target
+    target.input += Number(value.input) || 0
+    target.output += Number(value.output) || 0
+    target.total += Number(value.total) || 0
+    target.calls += Number(value.calls) || 0
+    target.cacheRead += Number(value.cacheRead) || 0
+    target.cacheWrite += Number(value.cacheWrite) || 0
+    target.searches += Number(value.searches) || 0
+    target.fetches += Number(value.fetches) || 0
+    for (const bucketName of ['peak', 'offpeak']) {
+      const source = value[bucketName]
+      if (!source) continue
+      const bucket = target[bucketName]
+      bucket.input += Number(source.input) || 0
+      bucket.output += Number(source.output) || 0
+      bucket.cacheRead += Number(source.cacheRead) || 0
+      bucket.cacheWrite += Number(source.cacheWrite) || 0
+    }
+    return target
+  }
+
+  // 已销毁子会话的成绩靠这里保住：会话从 store 消失后，用量仍然算在父任务上
+  function rememberParent(session) {
+    try {
+      const header = session && session.header
+      if (!header || !header.parentSession) return
+      const parent = textOf(header.parentSession)
+      const child = textOf(session.id)
+      if (!parent || !child || parent === child) return
+      let set = cache.childrenOf.get(parent)
+      if (!set) {
+        set = new Set()
+        cache.childrenOf.set(parent, set)
+      }
+      set.add(child)
+    } catch {
+      // ignore
+    }
+  }
+
+  function childrenIndex() {
+    const index = new Map()
+    const add = (parent, child) => {
+      if (!parent || !child || parent === child) return
+      let set = index.get(parent)
+      if (!set) {
+        set = new Set()
+        index.set(parent, set)
+      }
+      set.add(child)
+    }
+    const sessions = ctx.get('sessions')
+    if (sessions) {
+      try {
+        for (const session of sessions.list()) {
+          const header = session.header || {}
+          if (header.parentSession) add(textOf(header.parentSession), textOf(session.id))
+        }
+      } catch {
+        // ignore
+      }
+    }
+    for (const [parent, children] of cache.childrenOf) {
+      for (const child of children) add(parent, child)
+    }
+    // 持久化谱系兜底：进程重启后，早就结束的子会话不在 store 里，只能靠这条
+    for (const [parent, children] of cache.corpusChildren) {
+      for (const child of children) add(parent, child)
+    }
+    return index
+  }
+
+  function collectDescendants(rootId) {
+    if (!rootId) return []
+    const index = childrenIndex()
+    const seen = new Set([rootId])
+    const out = []
+    const queue = [rootId]
+    while (queue.length > 0) {
+      const current = queue.shift()
+      const kids = index.get(current)
+      if (!kids) continue
+      for (const kid of kids) {
+        if (seen.has(kid)) continue
+        seen.add(kid)
+        out.push(kid)
+        queue.push(kid)
+      }
+    }
+    return out
+  }
+
+  // ---- 持久化谱系 + 冷会话用量 ----------------------------------------------
+  //
+  // 子智能体的会话在结束（或被进程重启清掉）之后就不在 ctx.sessions 里了，
+  // 只靠活会话内存关系的话，"子任务"这一栏会在重启后整个消失。
+  // ctx.sessionQuery 读的是磁盘上的会话日志，所以：
+  //   1. traceSession(rootId)   拿到整棵谱系 -> 子会话 id
+  //   2. readSession(id)        把冷会话的日志读回来 -> 用它的事件累加用量
+  // 两件事都有缓存，重启后第一次打开页面补齐，之后每次轮询都是零成本。
+
+  const CORPUS_TTL_MS = 30 * 1000
+
+  function lineageNodeId(node) {
+    const header = node && node.session && node.session.header
+    return textOf(header && header.id)
+  }
+
+  async function refreshCorpus(rootId) {
+    const query = ctx.get('sessionQuery')
+    if (!query || typeof query.traceSession !== 'function' || !rootId) {
+      cache.corpusSource = 'none'
+      return
+    }
+    if (cache.corpusBusy) return cache.corpusBusy
+    const run = async () => {
+      try {
+        const trace = await query.traceSession(rootId)
+        const index = new Map()
+        const walk = (node, parentId) => {
+          const kids = node && Array.isArray(node.descendants) ? node.descendants : []
+          for (const kid of kids) {
+            const id = lineageNodeId(kid)
+            if (id && parentId) {
+              let set = index.get(parentId)
+              if (!set) {
+                set = new Set()
+                index.set(parentId, set)
+              }
+              set.add(id)
+            }
+            walk(kid, id || parentId)
+          }
+        }
+        walk(trace, rootId)
+        // store 里还活着的关系以实时数据为准，这里只补它没有的
+        for (const [parent, kids] of cache.childrenOf) {
+          let set = index.get(parent)
+          if (!set) {
+            set = new Set()
+            index.set(parent, set)
+          }
+          for (const kid of kids) set.add(kid)
+        }
+        cache.corpusChildren = index
+        cache.corpusSource = 'trace'
+        cache.corpusFor = rootId
+        cache.corpusAt = Date.now()
+        log('corpus trace ok: children=' + [...index.values()].reduce((n, set) => n + set.size, 0))
+      } catch (error) {
+        cache.corpusSource = 'none'
+        // 记下时间，失败也在 TTL 内不重试，免得每次轮询都刷一遍日志
+        cache.corpusFor = rootId
+        cache.corpusAt = Date.now()
+        log('corpus 谱系读取失败: ' + textOf((error && error.message) || error))
+      }
+    }
+    cache.corpusBusy = run().finally(() => {
+      cache.corpusBusy = null
+    })
+    return cache.corpusBusy
+  }
+
+  async function ensureCorpus(rootId) {
+    if (!rootId) return
+    const fresh = cache.corpusFor === rootId && Date.now() - cache.corpusAt < CORPUS_TTL_MS
+    if (fresh) return
+    await refreshCorpus(rootId)
+  }
+
+  // 冷会话（已结束/上次进程里的子任务）的用量从日志里补一次，之后走 finalStats。
+  async function hydrateCold(rootId) {
+    const query = ctx.get('sessionQuery')
+    if (!query || typeof query.readSession !== 'function' || !rootId) return
+    const sessions = ctx.get('sessions')
+    for (const id of collectDescendants(rootId)) {
+      if (cache.coldLoaded.has(id)) continue
+      let live = false
+      try {
+        live = Boolean(sessions && sessions.get(id))
+      } catch {
+        live = false
+      }
+      if (live) continue
+      if (cache.finalStats.has(id)) {
+        cache.coldLoaded.add(id)
+        continue
+      }
+      try {
+        const snapshot = await query.readSession(id)
+        const all = Array.isArray(snapshot && snapshot.events) ? snapshot.events : []
+        const from = Number(snapshot && snapshot.inheritedEventCount) || 0
+        const usage = sumUsageEvents(all.slice(from))
+        const header = (snapshot && snapshot.session) || {}
+        let model = ''
+        for (const event of all) {
+          if (event && event.type === 'request/context' && event.data) {
+            const name = textOf(event.data.model)
+            if (name) model = name
+          }
+        }
+        cache.finalStats.set(id, {
+          id,
+          live: false,
+          cold: true,
+          measured: true,
+          createdAt: Number(header.createdAt) || null,
+          parentId: header.parentSession ? textOf(header.parentSession) : null,
+          subagent: header.origin === 'subagent',
+          model,
+          provider: '',
+          title: '',
+          context: null,
+          ...usage,
+          at: Date.now(),
+        })
+        cache.coldLoaded.add(id)
+        log('cold hydrate ' + id + ' total=' + usage.total + ' calls=' + usage.calls)
+      } catch (error) {
+        // 读不出来就别每次轮询都重试
+        cache.coldLoaded.add(id)
+        log('冷会话读取失败 ' + id + ': ' + textOf((error && error.message) || error))
+      }
+    }
+  }
+
+  function statsOf(sessionId) {
+    const id = textOf(sessionId)
+    if (!id) return null
+    const live = sessionUsage(id)
+    if (live && live.live) return live
+    return cache.finalStats.get(id) || null
+  }
+
+  // 智能体团队：只有"当前会话正是一个 Team Lead"时才把队友算进来
+  function teammatesOf(rootId) {
+    const teams = ctx.get('agentTeams')
+    const agents = ctx.get('agents')
+    if (!teams || !agents || !rootId) return []
+    let self = null
+    try {
+      for (const agent of agents.list()) {
+        if (textOf(agent.id) === rootId) {
+          self = agent
+          break
+        }
+      }
+    } catch {
+      return []
+    }
+    if (!self) return []
+    try {
+      const membership = typeof teams.tryMembership === 'function' ? teams.tryMembership(self) : undefined
+      if (!membership || membership.role !== 'lead') return []
+      const members = teams.listMembers(self) || []
+      const out = []
+      for (const member of members) {
+        if (!member || member.role !== 'teammate') continue
+        const id = textOf(member.id)
+        if (!id) continue
+        out.push({ id, name: textOf(member.name), status: textOf(member.status) })
+      }
+      return out
+    } catch {
+      return []
+    }
+  }
+
+  function partOf(stats) {
+    if (!stats) return null
+    return {
+      id: stats.id,
+      live: stats.live === true,
+      model: stats.model || '',
+      measured: true,
+      input: stats.input || 0,
+      output: stats.output || 0,
+      total: stats.total || 0,
+      calls: stats.calls || 0,
+      cacheRead: stats.cacheRead || 0,
+      cacheWrite: stats.cacheWrite || 0,
+      peak: stats.peak || emptyBucket(),
+      offpeak: stats.offpeak || emptyBucket(),
+      searches: stats.searches || 0,
+      fetches: stats.fetches || 0,
+    }
+  }
+
+  function partFromTotals(totals, model) {
+    return {
+      id: null,
+      live: false,
+      model: model || '',
+      measured: true,
+      ...totals,
+    }
+  }
+
+  // mainValue 由调用方传进来（它带 :ctx 变体），避免这里再算一遍导致缓存反复失效
+  //
+  // 口径：子任务 = 这棵树下**所有**子会话（含队友）；队友只是其中被单独拆出来看的一块，
+  // 不从子任务里扣除，也不再单独参与合计 —— 否则同一份用量会被算两次。
+  function taskRollup(rootId, mainValue) {
+    const parts = { main: null, subagents: null, teammates: null }
+    const counts = { subagents: 0, teammates: 0 }
+    if (!rootId) return { parts, counts }
+
+    parts.main = partOf(mainValue)
+
+    // 队友是 Lead 的子会话（origin=subagent、parentSession=Lead），
+    // 它自己的子智能体又是它的子会话，所以"队友整棵子树"就是拆解出来的那一块。
+    const mates = teammatesOf(rootId)
+    const mateTree = new Set()
+    for (const mate of mates) {
+      mateTree.add(mate.id)
+      for (const id of collectDescendants(mate.id)) mateTree.add(id)
+    }
+
+    const subTotals = emptyTotals()
+    let subModel = ''
+    for (const id of collectDescendants(rootId)) {
+      const stats = statsOf(id)
+      if (!stats) continue
+      counts.subagents += 1
+      addInto(subTotals, stats)
+      if (!subModel && stats.model) subModel = stats.model
+    }
+    if (counts.subagents > 0) parts.subagents = partFromTotals(subTotals, subModel)
+
+    const teamTotals = emptyTotals()
+    let teamModel = ''
+    if (mates.length > 0) {
+      counts.teammates = mates.length
+      for (const id of mateTree) {
+        const stats = statsOf(id)
+        if (!stats) continue
+        addInto(teamTotals, stats)
+        if (!teamModel && stats.model) teamModel = stats.model
+      }
+      parts.teammates = partFromTotals(teamTotals, teamModel)
+    }
+
+    return { parts, counts }
+  }
+
   function balanceMs() {
     return clampNumber(readSettings().balanceSeconds, intervalMs / 1000, 5, 3600) * 1000
   }
@@ -556,7 +967,15 @@ export function apply(ctx, config = {}) {
     const now = Date.now()
     const settings = readSettings()
     const activeId = resolveActiveId()
-    const session = sessionUsage(activeId) || { id: null, live: false }
+    const main = mainStats(activeId)
+    // 任务级汇总：主会话 + 这棵树下所有子会话（队友已经在 subagents 里，不再重复加）
+    const rollup = taskRollup(main ? activeId : null, main)
+
+    const totals = emptyTotals()
+    addInto(totals, rollup.parts.main)
+    addInto(totals, rollup.parts.subagents)
+    const measured = Boolean(rollup.parts.main || rollup.parts.subagents || rollup.parts.teammates)
+
     return {
       ok: true,
       now,
@@ -579,12 +998,29 @@ export function apply(ctx, config = {}) {
         error: cache.balanceError,
       },
       session: {
-        ...session,
+        id: main ? main.id : activeId,
+        live: Boolean(main),
         // 优先用宿主从 sessionTitle 折出来的真标题，页面报上来的文字只作兜底
-        title: session.title || cache.activeTitle || '',
+        title: (main && main.title) || cache.activeTitle || '',
+        model: (main && main.model) || '',
+        provider: (main && main.provider) || '',
+        createdAt: main ? main.createdAt : null,
+        context: main ? main.context : null,
+        measured,
         // tracked 表示这个 id 确实解析到了一个活着的 Session；
         // 页面猜错 id 时为 false，UI 退回 '—' 而不是显示假数据。
-        tracked: session.live === true,
+        tracked: Boolean(main),
+        // 合计（主 + 子 + 队友）
+        ...totals,
+        // 分项：页面据此展示"主会话 / 子任务 / 队友"的金额与 token
+        parts: rollup.parts,
+        counts: rollup.counts,
+        diag: {
+          corpus: cache.corpusSource,
+          corpusAt: cache.corpusAt,
+          childrenOfRoot: (childrenIndex().get(activeId) || { size: 0 }).size,
+          cold: cache.coldLoaded.size,
+        },
       },
     }
   }
@@ -642,6 +1078,17 @@ export function apply(ctx, config = {}) {
           const resolved = resolveByTitle(typed) || (live ? sid : '') || sid
           if (resolved) cache.activeSessionId = resolved
           cache.activeTitle = typed
+        }
+        // 子任务/队友的谱系和冷会话用量：磁盘上的会话日志是重启后唯一可靠的来源，
+        // 靠它把已经结束（或上个进程里的）子任务补回来。
+        const activeId = resolveActiveId()
+        if (activeId) {
+          try {
+            await ensureCorpus(activeId)
+            await hydrateCold(activeId)
+          } catch (error) {
+            log('corpus/hydrate 失败: ' + textOf((error && error.message) || error))
+          }
         }
         if (Date.now() - cache.balanceAt > balanceMs()) {
           // 首次（插件刚加载、账号服务可能还没就绪）等一下再回包，
@@ -714,14 +1161,55 @@ export function apply(ctx, config = {}) {
     }),
   )
 
-  // ---- 活动 session 兜底 ------------------------------------------------------
+  // ---- 会话关系与生命周期 ------------------------------------------------------
 
   ctx.effect(() =>
     ctx.on('session/event', (session) => {
       try {
+        // 任何会话（含子智能体）都要记录父子关系，子会话销毁后关系仍然有效
+        rememberParent(session)
         const header = session && session.header
         if (!header || header.origin === 'subagent') return
         cache.lastActivityId = textOf(session.id)
+      } catch {
+        // ignore
+      }
+    }),
+  )
+
+  // 子智能体一被创建就记下父子关系：不依赖 session/event 是否送到本级上下文。
+  ctx.effect(() =>
+    ctx.on('subagent/start', (info) => {
+      try {
+        const childId = textOf(info && info.id)
+        if (!childId) return
+        const sessions = ctx.get('sessions')
+        const child = sessions ? sessions.get(childId) : undefined
+        const parent = textOf(child && child.header && child.header.parentSession)
+        if (!parent) return
+        let set = cache.childrenOf.get(parent)
+        if (!set) {
+          set = new Set()
+          cache.childrenOf.set(parent, set)
+        }
+        set.add(childId)
+        log('subagent/start ' + childId + ' <- ' + parent)
+      } catch {
+        // ignore
+      }
+    }),
+  )
+
+  // 会话离开 store 之前把成绩固化下来，否则子任务/队友销毁后这块用量就丢了
+  ctx.effect(() =>
+    ctx.on('session/disposed', (session) => {
+      try {
+        const id = textOf(session && session.id)
+        if (!id) return
+        // 子会话销毁时也记一次父子关系：插件可能在它创建之后才加载，没赶上 session/event
+        rememberParent(session)
+        const final = measureSession(session, false, id)
+        if (final) cache.finalStats.set(id, final)
       } catch {
         // ignore
       }

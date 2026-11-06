@@ -66,6 +66,13 @@
       model: '计价模型',
       updated: '余额更新',
       sessionId: '会话',
+      mainChat: '主会话',
+      subagents: '子任务',
+      teammates: '队友',
+      sectionConsumption: '消耗构成',
+      sectionUsage: '用量',
+      sectionBalance: '余额',
+      sectionDebug: '调试',
       expand: '展开 Token Monitor',
       expandWithCost: '展开 Token Monitor（本对话 {cost}）',
       closeTip: '收起成贴右侧的竖条',
@@ -94,6 +101,13 @@
       model: 'Priced model',
       updated: 'Balance updated',
       sessionId: 'Session',
+      mainChat: 'Main chat',
+      subagents: 'Subagents',
+      teammates: 'Teammates',
+      sectionConsumption: 'Breakdown',
+      sectionUsage: 'Usage',
+      sectionBalance: 'Balance',
+      sectionDebug: 'Debug',
       expand: 'Open Token Monitor',
       expandWithCost: 'Open Token Monitor (this chat {cost})',
       closeTip: 'Collapse into the tab on the right',
@@ -196,6 +210,15 @@
     return wallets[0] || null
   }
 
+  function bonusText(wallets) {
+    var wallet = pickWallet(wallets)
+    if (!wallet) return null
+    var amount = Number(wallet.balance)
+    // 没有赠送余额（0 或取不到）时整行隐藏，不显示 ¥0.00
+    if (!isFinite(amount) || amount <= 0) return null
+    return formatMoney(wallet)
+  }
+
   function formatMoney(wallet) {
     if (!wallet) return null
     var amount = Number(wallet.balance)
@@ -288,37 +311,63 @@
     return (searches * toolRates.searchPer1000 + fetches * toolRates.fetchPer1000) / 1000
   }
 
-  function costOf(session) {
-    if (!session || !session.measured) return null
-    var extras = toolCost(session)
-    var entry = priceTable[session.model] || priceTable[FALLBACK_MODEL]
+  // 单个分项（主会话 / 子任务 / 队友）的金额：每个分项用自己的模型单价
+  function partCost(part) {
+    if (!part || !part.measured) return null
+    var extras = toolCost(part)
+    var entry = priceTable[part.model] || priceTable[FALLBACK_MODEL]
 
     // 优先用宿主按「调用发生时刻」分好桶的用量：高峰和空闲各按自己的单价算，
     // 比把全部 token 按当前时段一刀切准得多。
-    if (entry && (session.peak || session.offpeak)) {
-      var peakCost = bucketCost(session.peak, entry.peak)
-      var idleCost = bucketCost(session.offpeak, entry.offpeak)
+    if (entry && (part.peak || part.offpeak)) {
+      var peakCost = bucketCost(part.peak, entry.peak)
+      var idleCost = bucketCost(part.offpeak, entry.offpeak)
       if (peakCost != null || idleCost != null) {
         return (peakCost || 0) + (idleCost || 0) + extras
       }
     }
 
     // 兼容：宿主没给分桶数据时退回「总量 × 当前时段」
-    var rates = entry ? ratesFor(session.model) : null
+    var rates = entry ? ratesFor(part.model) : null
     if (!rates) return extras > 0 ? extras : null
     var tokenCost = bucketCost(
-      { input: session.input, cacheWrite: session.cacheWrite, cacheRead: session.cacheRead, output: session.output },
+      { input: part.input, cacheWrite: part.cacheWrite, cacheRead: part.cacheRead, output: part.output },
       rates,
     )
     if (tokenCost == null) return extras > 0 ? extras : null
     return tokenCost + extras
   }
 
+  // 任务级金额 = 主会话 + 子任务；队友已经包含在子任务里（页面只做缩进拆解），不能重复加
+  function costOf(session) {
+    if (!session || !session.measured) return null
+    var parts = session.parts
+    if (parts) {
+      var total = 0
+      var any = false
+      var keys = ['main', 'subagents']
+      for (var i = 0; i < keys.length; i++) {
+        var value = partCost(parts[keys[i]])
+        if (value == null) continue
+        total += value
+        any = true
+      }
+      if (any) return total
+    }
+    return partCost(session)
+  }
+
   function formatCost(cny) {
     if (cny == null) return null
     if (cny >= 100) return '¥' + cny.toFixed(0)
-    if (cny >= 1) return '¥' + cny.toFixed(2)
     return '¥' + cny.toFixed(2)
+  }
+
+  // 分项行文本："≈¥0.42 · 12.3k tok"
+  function partLine(part) {
+    var cny = partCost(part)
+    if (cny == null) return null
+    return '≈' + formatCost(cny) + ' · ' + formatTokens(part.total) + ' tok'
   }
 
   function formatClock(ms) {
@@ -462,8 +511,8 @@
     '  box-sizing: border-box; width: ' + CARD_W + 'px; padding: 11px 13px 12px;',
     '  border-radius: 12px; cursor: grab; user-select: none;',
     '  font: 12.5px/1.5 -apple-system, "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;',
-    '  background: rgba(255,255,255,0.95); color: #1f2328;',
-    '  border: 1px solid rgba(0,0,0,0.10);',
+    '  background: var(--dsw-alias-bg-layer-2, rgba(255,255,255,0.95)); color: var(--dsw-alias-label-primary, #1f2328);',
+    '  border: 1px solid var(--dsw-alias-border-l1, rgba(0,0,0,0.10));',
     '  box-shadow: 0 8px 24px rgba(0,0,0,0.12), 0 1px 3px rgba(0,0,0,0.06);',
     '  backdrop-filter: blur(10px); pointer-events: auto;',
     // top 设的是「竖条中心」，再靠 translateY(-50%) 自居中：
@@ -481,37 +530,43 @@
     '.card.dragging .extra { display: block !important; }',
     '.row { display: flex; align-items: baseline; gap: 8px; white-space: nowrap; }',
     '.row + .row { margin-top: 4px; }',
-    '.label { color: #6a737d; font-size: 11.5px; flex: none; }',
+    '.label { color: var(--dsw-alias-label-secondary, #6a737d); font-size: 11.5px; flex: none; }',
     '.value { font-weight: 600; font-size: 13.5px; font-variant-numeric: tabular-nums; overflow: hidden; text-overflow: ellipsis; }',
-    '.value.dim { color: #9aa2ac; font-weight: 500; }',
-    '.sub { margin-left: auto; color: #8b949e; font-size: 11px; font-variant-numeric: tabular-nums; }',
+    '.value.dim { color: var(--dsw-alias-label-secondary, #9aa2ac); font-weight: 500; }',
+    '.sub { margin-left: auto; color: var(--dsw-alias-label-secondary, #8b949e); font-size: 11px; font-variant-numeric: tabular-nums; }',
     '.head { display: flex; align-items: center; gap: 6px; }',
-    '.dot { width: 7px; height: 7px; border-radius: 50%; background: #b8bfc7; flex: none; }',
-    '.dot.ok { background: #2da44e; }',
-    '.dot.warn { background: #d29922; }',
-    '.dot.bad { background: #cf222e; }',
-    '.title { flex: 1; color: #6a737d; font-size: 11.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }',
+    '.dot { width: 7px; height: 7px; border-radius: 50%; background: var(--dsw-alias-state-idle-primary, #b8bfc7); flex: none; }',
+    '.dot.ok { background: var(--dsw-alias-state-success-primary, #2da44e); }',
+    '.dot.warn { background: var(--dsw-alias-state-warn-primary, #d29922); }',
+    '.dot.bad { background: var(--dsw-alias-state-error-primary, #cf222e); }',
+    '.title { flex: 1; color: var(--dsw-alias-label-secondary, #6a737d); font-size: 11.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }',
     '.close {',
     '  flex: none; width: 18px; height: 18px; line-height: 17px; text-align: center;',
-    '  border-radius: 6px; color: #d1242f; cursor: pointer; font-size: 15px; font-weight: 700;',
+    '  border-radius: 6px; color: var(--dsw-alias-state-error-primary, #d1242f); cursor: pointer; font-size: 15px; font-weight: 700;',
     '  transition: background 120ms ease, color 120ms ease, box-shadow 120ms ease;',
     '}',
-    '.close:hover { background: #d1242f; color: #fff; box-shadow: 0 0 10px rgba(209,36,47,0.45); }',
+    '.close:hover { background: var(--dsw-alias-state-error-primary, #d1242f); color: #fff; box-shadow: 0 0 10px rgba(209,36,47,0.45); }',
     // 明细展开/收起动画：用 max-height + opacity 过渡，而不是 display 切换
     '.extra {',
     '  max-height: 0; opacity: 0; overflow: hidden;',
     '  margin-top: 0; padding-top: 0;',
     '  border-top: 1px dashed transparent;',
-    '  color: #57606a; font-size: 11.5px;',
+    '  color: var(--dsw-alias-label-secondary, #57606a); font-size: 11.5px;',
     '  transition: max-height 200ms ease, opacity 160ms ease, margin-top 200ms ease, padding-top 200ms ease;',
     '}',
     '.card.expanded .extra, .card.dragging .extra {',
-    '  max-height: 240px; opacity: 1; margin-top: 7px; padding-top: 7px;',
-    '  border-top-color: rgba(0,0,0,0.10);',
+    '  max-height: 380px; opacity: 1; margin-top: 7px; padding-top: 7px;',
+    '  border-top-color: var(--dsw-alias-border-l1, rgba(0,0,0,0.10));',
     '}',
     '.kv { display: flex; align-items: baseline; gap: 10px; line-height: 1.62; }',
-    '.kv .k { flex: none; width: 62px; color: #8b949e; }',
+    '.kv .k { flex: none; width: 62px; color: var(--dsw-alias-label-secondary, #8b949e); }',
     '.kv .v { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-variant-numeric: tabular-nums; }',
+    // 队友是「子任务」的一部分：缩进成拆解行，避免被当成另一笔账去加
+    '.kv-sub { padding-left: 10px; }',
+    '.kv-sub .k { opacity: 0.85; }',
+    '.kv-sub .v { opacity: 0.92; }',
+    '.kv-section + .kv-section { margin-top: 6px; padding-top: 5px; border-top: 1px dashed var(--dsw-alias-border-l1, rgba(0,0,0,0.06)); }',
+    '.kv-section-title { font-size: 10px; letter-spacing: 0.6px; color: var(--dsw-alias-label-secondary, #9aa2ac); margin-bottom: 2px; }',
     '.tab {',
     '  position: fixed; right: 0; top: 50%; transform: translateY(-50%);',
     '  box-sizing: border-box; width: 32px; min-height: 112px; padding: 12px 0;',
@@ -534,11 +589,14 @@
     '.tab .dot { background: #fff; width: 7px; height: 7px; box-shadow: 0 0 0 3px rgba(255,255,255,0.22); }',
     '.tab .tabValue { writing-mode: vertical-rl; text-orientation: mixed; font-variant-numeric: tabular-nums; }',
     '@media (prefers-color-scheme: dark) {',
-    '  .card { background: rgba(32,34,38,0.95); color: #e6edf3; border-color: rgba(255,255,255,0.10); }',
-    '  .label, .title, .extra { color: #9198a1; }',
-    '  .value.dim, .sub { color: #6e7681; }',
-    '  .close:hover { background: #d1242f; color: #fff; }',
-    '  .card.expanded .extra, .card.dragging .extra { border-top-color: rgba(255,255,255,0.12); }',
+    // 深色兜底：token 在就跟着宿主的深色值走，token 不在才用这里写死的深色
+    '  .card { background: var(--dsw-alias-bg-layer-2, rgba(32,34,38,0.95)); color: var(--dsw-alias-label-primary, #e6edf3); border-color: var(--dsw-alias-border-l1, rgba(255,255,255,0.10)); }',
+    '  .label, .title, .extra { color: var(--dsw-alias-label-secondary, #9198a1); }',
+    '  .value.dim, .sub { color: var(--dsw-alias-label-secondary, #6e7681); }',
+    '  .close:hover { background: var(--dsw-alias-state-error-primary, #d1242f); color: #fff; }',
+    '  .card.expanded .extra, .card.dragging .extra { border-top-color: var(--dsw-alias-border-l1, rgba(255,255,255,0.12)); }',
+    '  .kv-section + .kv-section { border-top-color: var(--dsw-alias-border-l1, rgba(255,255,255,0.08)); }',
+    '  .kv-section-title { color: var(--dsw-alias-label-secondary, #6e7681); }',
     '}',
   ].join('\n')
 
@@ -601,8 +659,23 @@
   var extra = document.createElement('div')
   extra.className = 'extra'
   var kvRows = {}
+  var sections = {}
+  var sectionOrder = []
 
-  function addKv(key, labelKey) {
+  // 明细分组：每组有自己的小标题，组内没有可见行时整组隐藏
+  function addSection(key, labelKey) {
+    var section = document.createElement('div')
+    section.className = 'kv-section'
+    var title = document.createElement('div')
+    title.className = 'kv-section-title'
+    title.textContent = t(labelKey)
+    section.appendChild(title)
+    extra.appendChild(section)
+    sections[key] = { el: section, title: title, labelKey: labelKey, keys: [] }
+    sectionOrder.push(key)
+  }
+
+  function addKv(key, labelKey, sectionKey) {
     var row = document.createElement('div')
     row.className = 'kv'
     var k = document.createElement('span')
@@ -612,8 +685,10 @@
     v.className = 'v'
     row.appendChild(k)
     row.appendChild(v)
-    extra.appendChild(row)
-    kvRows[key] = { row: row, label: k, value: v, labelKey: labelKey }
+    var section = sections[sectionKey]
+    ;(section ? section.el : extra).appendChild(row)
+    if (section) section.keys.push(key)
+    kvRows[key] = { row: row, label: k, value: v, labelKey: labelKey, section: sectionKey }
   }
 
   function setKv(key, text) {
@@ -627,14 +702,43 @@
     cell.value.textContent = text
   }
 
-  addKv('bonus', 'bonus')
-  addKv('tokens', 'tokens')
-  addKv('calls', 'calls')
-  addKv('context', 'context')
-  addKv('tools', 'tools')
-  addKv('model', 'model')
-  addKv('updated', 'updated')
-  addKv('session', 'sessionId')
+  // 组内一行都没显示时，把整组（含小标题）收起来
+  function syncSections() {
+    for (var i = 0; i < sectionOrder.length; i++) {
+      var section = sections[sectionOrder[i]]
+      var visible = false
+      for (var j = 0; j < section.keys.length; j++) {
+        var cell = kvRows[section.keys[j]]
+        if (cell && cell.row.style.display !== 'none') {
+          visible = true
+          break
+        }
+      }
+      section.el.style.display = visible ? 'block' : 'none'
+    }
+  }
+
+  addSection('consumption', 'sectionConsumption')
+  addSection('usage', 'sectionUsage')
+  addSection('balance', 'sectionBalance')
+  addSection('debug', 'sectionDebug')
+
+  addKv('main', 'mainChat', 'consumption')
+  addKv('sub', 'subagents', 'consumption')
+  addKv('team', 'teammates', 'consumption')
+  // 队友不单列成一笔账：缩进成「子任务」的拆解行
+  kvRows.team.row.className = 'kv kv-sub'
+
+  addKv('tokens', 'tokens', 'usage')
+  addKv('calls', 'calls', 'usage')
+  addKv('context', 'context', 'usage')
+  addKv('tools', 'tools', 'usage')
+  addKv('model', 'model', 'usage')
+
+  addKv('bonus', 'bonus', 'balance')
+  addKv('updated', 'updated', 'balance')
+
+  addKv('session', 'sessionId', 'debug')
 
   card.appendChild(head)
   card.appendChild(rowBalance)
@@ -770,14 +874,11 @@
     var moved = false
     var target = event.currentTarget
     var captureId = null
-    // 从浮窗上开始拖时锁住它的高度：拖动过程中鼠标可能离开/回到卡片，
-    // 明细一旦收起展开，卡片高度就变，位置会跟着跳。锁住高度并强制展开明细。
-    var lockedHeight = null
+    // 注意：这里不能再按 offsetHeight 锁高。刚加 .expanded 时 max-height 过渡才刚开始，
+    // 卡片实际高度还是"收起"的尺寸，锁住会让展开后的明细溢出到卡片外面（文字飘在底板外）。
+    // 改成：拖动期间强制保持 expanded，并忽略 mouseleave 的收起。
     if (target === card) {
-      // 开始拖就立刻展开明细并锁高，拖动过程中不会因为悬停计时/移出而收起来
       card.classList.add('expanded')
-      lockedHeight = card.offsetHeight
-      card.style.height = lockedHeight + 'px'
     }
 
     function onMove(moveEvent) {
@@ -800,14 +901,19 @@
         // ignore
       }
       target.classList.remove('dragging')
-      if (lockedHeight != null) card.style.height = ''
       if (moved) {
         writeJson(KEY_TAB, { ry: tabRatio.ry })
-        // 松手后按真实高度重新对齐一次
-        scheduleReposition()
       } else if (onTap) {
         onTap()
       }
+      // 拖动期间忽略过 mouseleave，松手后如果指针已经不在浮窗上就补一次收起
+      if (target === card) {
+        window.setTimeout(function () {
+          if (!card.matches(':hover')) card.classList.remove('expanded')
+        }, 0)
+      }
+      // 展开过渡结束后高度才稳定，这里按最终高度重新对齐一次
+      scheduleReposition()
     }
 
     try {
@@ -873,6 +979,8 @@
     window.clearTimeout(expandTimer)
     expandTimer = null
     inCloseZone = false
+    // 拖动过程中鼠标难免移出卡片，这时不要收起明细，否则拖到一半内容突然缩回去
+    if (card.classList.contains('dragging')) return
     card.classList.remove('expanded')
   })
 
@@ -960,8 +1068,29 @@
     tabDot.className = dot.className
     tab.title = cost == null ? t('expand') : t('expandWithCost', { cost: formatCost(cost) })
 
-    setKv('bonus', formatMoney(pickWallet(balance.bonusWallets)))
+    setKv('bonus', bonusText(balance.bonusWallets))
     setKv('tokens', session.measured ? formatTokens(session.total) + ' tok' : null)
+
+    // 分项拆解：子任务 = 所有子会话（含队友），队友缩进成它的拆解行，不重复计入合计
+    var parts = session.parts || null
+    var counts = session.counts || {}
+    if (parts && (parts.subagents || parts.teammates)) {
+      setKv('main', partLine(parts.main))
+      setKv(
+        'sub',
+        parts.subagents
+          ? partLine(parts.subagents) + (counts.subagents > 1 ? ' ×' + counts.subagents : '')
+          : null,
+      )
+      setKv(
+        'team',
+        parts.teammates ? '└ ' + partLine(parts.teammates) + ' ×' + (counts.teammates || 1) : null,
+      )
+    } else {
+      setKv('main', null)
+      setKv('sub', null)
+      setKv('team', null)
+    }
     setKv('calls', session.measured && session.calls ? t('times', { n: session.calls }) : null)
     setKv('context', session.measured && session.context ? formatTokens(session.context) + ' tok' : null)
     var searchCount = Number(session.searches) || 0
@@ -994,6 +1123,7 @@
       : (session.id || 'Token Monitor')
 
     // 其余被省略号截断的文本，同样用 tooltip 兜底显示全量
+    syncSections()
     syncTooltip(valBalance)
     syncTooltip(valSession)
     syncTooltip(subSession)

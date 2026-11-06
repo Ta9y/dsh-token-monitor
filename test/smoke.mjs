@@ -7,7 +7,10 @@ import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
-const PKG = path.join(HERE, '..')
+// 两种布局都要能跑：工作区里 test/ 在仓库根（包在 ../dsh-token-monitor），
+// 发布快照里 test/ 就在包内（.. 就是包本身）。
+const PARENT = path.join(HERE, '..')
+const PKG = fs.existsSync(path.join(PARENT, 'package.json')) ? PARENT : path.join(PARENT, 'dsh-token-monitor')
 
 const usageEvents = [
   { type: 'user/message', data: { text: 'hi' } },
@@ -121,21 +124,21 @@ const stateRoute = routes.get('/dsh-token-monitor/state')
 // 1) 跨站 Origin → 403（挡住网页对 localhost 的 CSRF 读取）
 {
   const res = fakeRes()
-  stateRoute.handler(fakeReq('/dsh-token-monitor/state', { origin: 'https://evil.example' }), res)
+  await stateRoute.handler(fakeReq('/dsh-token-monitor/state', { origin: 'https://evil.example' }), res)
   assert.equal(res.status, 403)
 }
 
 // 1b) 桌面端渲染进程（Origin: dsh-app://app，没有令牌）→ 放行
 {
   const res = fakeRes()
-  stateRoute.handler(fakeReq('/dsh-token-monitor/state', { origin: 'dsh-app://app' }), res)
+  await stateRoute.handler(fakeReq('/dsh-token-monitor/state', { origin: 'dsh-app://app' }), res)
   assert.equal(res.status, 200)
 }
 
 // 1c) 同源/本地请求（无 Origin）→ 放行
 {
   const res = fakeRes()
-  stateRoute.handler(fakeReq('/dsh-token-monitor/state'), res)
+  await stateRoute.handler(fakeReq('/dsh-token-monitor/state'), res)
   assert.equal(res.status, 200)
 }
 
@@ -154,7 +157,7 @@ const token = tokenMatch[1]
 // 2) 有令牌 → 200 且带余额与 token 消耗
 {
   const res = fakeRes()
-  stateRoute.handler(
+  await stateRoute.handler(
     fakeReq('/dsh-token-monitor/state?s=sess-1&t=%E4%BB%BB%E5%8A%A1A', { 'x-dsh-token-monitor': token }),
     res,
   )
@@ -173,7 +176,7 @@ const token = tokenMatch[1]
 // 3) 页面报了宿主不认识的 session → 仍 200，但 tracked=false
 {
   const res = fakeRes()
-  stateRoute.handler(fakeReq('/dsh-token-monitor/state?s=ghost', { 'x-dsh-token-monitor': token }), res)
+  await stateRoute.handler(fakeReq('/dsh-token-monitor/state?s=ghost', { 'x-dsh-token-monitor': token }), res)
   assert.equal(res.status, 200)
   const data = JSON.parse(res.body)
   assert.equal(data.session.live, false)
@@ -183,7 +186,7 @@ const token = tokenMatch[1]
 // 4) 令牌正确时，即使带跨站 Origin 也放行（令牌本身就是凭证）
 {
   const res = fakeRes()
-  stateRoute.handler(
+  await stateRoute.handler(
     fakeReq('/dsh-token-monitor/state', { 'x-dsh-token-monitor': token, origin: 'https://evil.example' }),
     res,
   )
@@ -193,7 +196,7 @@ const token = tokenMatch[1]
 // 4b) 令牌错误 + 跨站 Origin → 403
 {
   const res = fakeRes()
-  stateRoute.handler(
+  await stateRoute.handler(
     fakeReq('/dsh-token-monitor/state', { 'x-dsh-token-monitor': 'deadbeef', origin: 'https://evil.example' }),
     res,
   )
@@ -215,7 +218,7 @@ const token = tokenMatch[1]
   assert.equal(typeof listener, 'function')
   listener({ id: 'sess-1', header: {} }, { type: 'turn/start' })
   const res = fakeRes()
-  stateRoute.handler(fakeReq('/dsh-token-monitor/state', { 'x-dsh-token-monitor': token }), res)
+  await stateRoute.handler(fakeReq('/dsh-token-monitor/state', { 'x-dsh-token-monitor': token }), res)
   const data = JSON.parse(res.body)
   assert.equal(data.session.id, 'sess-1', 'falls back to last active session')
 }

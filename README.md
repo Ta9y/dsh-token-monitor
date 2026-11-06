@@ -1,12 +1,12 @@
 # dsh-token-monitor
 
-[English](README.en.md) · **简体中文**
-
 **整个插件，除了这一行字以外，由DeepSeek Harness生成**
 
 给 DeepSeek Harness 用的悬浮小窗：显示**账户余额**、**当前对话已消耗的 token**，以及按官方价目估算的**本次对话花费**。
 
 贴在窗口右边缘的一个窄竖条 + 展开卡片，可拖动、可收起，不占阅读空间。
+
+> English README: [README.en.md](./README.en.md) · 仓库：[GitHub](https://github.com/Ta9y/dsh-token-monitor)
 
 ```
 ┌──────────────────────┐ ┌──┐
@@ -29,6 +29,27 @@
 - **跟随应用语言**：简体中文 / English，应用里切语言即时同步
 - **可拖动**：竖条上下拖，浮窗与竖条始终垂直对齐；位置按视口比例记忆
 - **不打扰**：悬停 320ms 才展开明细；鼠标停在 × 那一排时不展开，避免点不中
+
+## ⚠️ 高危权限使用声明（务必阅读）
+
+1. **本项目不申请任何提权、审批或代操作权限**：不注册工具、不自动同意、不绕过、不降低任何审批策略，
+   你不需要为它点「允许一次」。
+2. **它读什么**：只读当前对话及其子会话的用量数据（余额、usage、标题、上下文、团队名单）；
+   子会话结束后会读一次它在磁盘上的会话日志，只为累加 token。
+3. **它在本机提供 3 个只读路由**：`/dsh-token-monitor/state`、`/dsh-token-monitor/probe`、`/dsh-token-monitor/ui.js`，
+   只经 DSH 自己的回环地址提供，带随机令牌 + 同源 / 桌面 Origin 守卫，跨站请求一律 `403`。
+4. **它写什么**：只写插件目录下的 `debug.log`（诊断）、`token.txt`（页面令牌）、`prices.auto.json`（价格缓存）；
+   不写工作区、不写会话。
+5. **它出网吗**：只有每月一次抓官方价目页（`api-docs.deepseek.com`）；余额查询走 DSH 账号服务，插件不直接连平台。
+6. **它不上传任何东西**：无遥测、无统计、无第三方 API；数据只在本机内存里累加。
+
+逐项的接口 / 频率清单见下文「[权限与接口](#权限与接口)」。
+
+## 环境要求
+
+- DSH 0.2.x（`@deepseek-ai/dsh-base` + `dsh-web-app` 组合）
+- 桌面端走 `dsh.client` 客户端模块注入；纯浏览器模式（`dsh web`）走 index 注入
+- 只在 Windows 的 `desktop` profile 上实测过；macOS / Linux 未验证
 
 ## 安装
 
@@ -67,6 +88,15 @@ pnpm add file:C:/path/to/dsh-token-monitor
 > 安装后**需要重启一次 DSH 进程**：host 半的代码走 ESM 缓存，重载插件不会重新执行。
 > 之后改 `ui.js` / `config.json` 只要刷新页面即可。
 
+## 使用
+
+1. 页面右边缘出现一条窄竖条，显示余额；鼠标移上去展开卡片。
+2. 卡片顶部是「余额 / 本对话消耗 / 估算花费」，下面按「消耗构成 / 用量 / 余额」分组列明细。
+3. 竖条上下拖动改变位置（按视口比例记住）；点 × 收起，收起后点竖条还能展开。
+4. 应用里切换语言（简中 / English），浮窗文字即时跟着变。
+
+> 悬停 320ms 才展开；鼠标停在 × 那一排时不会展开，免得点不中。
+
 ## 配置
 
 `config.json`（插件目录下，改完刷新页面生效，不用重启）：
@@ -104,27 +134,79 @@ pnpm add file:C:/path/to/dsh-token-monitor
 价格来源：[DeepSeek 官方价目页](https://api-docs.deepseek.com/zh-cn/quick_start/pricing/)，
 由插件每月自动抓取并缓存在 `prices.auto.json`（含 `fetchedAt`）；解析失败时保留旧值。
 
+## 外观与配色
+
+- 竖条：品牌蓝渐变 `#2f7cf6 → #1a5fd0 → #1549a6` + 白字；hover 加白色内描边与蓝色光晕
+- 卡片：跟随 DSH 主题 token（`--dsw-alias-bg-layer-2` / `label-primary` / `label-secondary` / `border-l1`），
+  深浅色自动切换；token 缺失时退回内置的浅/深两套色值
+- 状态点：正常 = `--dsw-alias-state-success-primary`，待确认 = `state-warn`，出错 = `state-error`，未激活 = `state-idle`
+- 数字统一等宽（`tabular-nums`）：金额写成 `≈¥0.42`，token 写成 `25.4M tok`
+
+## 权限与接口
+
+它只读、只显示：不改会话、不发消息、不执行任何 Agent。下面是用到的**全部** DSH 能力。
+
+| 接口（都只读） | 用途 | 频率 |
+|---|---|---|
+| `ctx.deepseekAccount.getBalance()` | 余额 + 赠送余额 | 60s（`balanceSeconds`） |
+| `ctx.sessions.get()` / `list()` | 当前会话对象、还活着的子会话 | 10s |
+| `ctx.sessionTitle.get()` | 会话标题（用来跟随当前对话） | 10s |
+| `ctx.tokenMeter.measure()` | 上下文占用 | 10s |
+| `ctx.sessionQuery.traceSession()` | 会话谱系：这个对话下面有哪些子会话（读磁盘上的会话头） | 30s / 切会话 |
+| `ctx.sessionQuery.readSession()` | 读**已结束子会话**的事件日志，只为累加 token | 每个子会话一次 |
+| `ctx.agentTeams.tryMembership()` / `listMembers()` | 判断哪些子会话是队友 | 10s |
+| `ctx.agents.list()` | 找到当前会话对应的 Agent | 10s |
+
+注册的东西：
+
+| 注册 | 内容 |
+|---|---|
+| `webServer.register` | `GET /dsh-token-monitor/state`（余额 + 用量 JSON）、`GET /dsh-token-monitor/probe`（诊断日志）、`GET /dsh-token-monitor/ui.js`（界面脚本） |
+| `webServer.tapIndex()`（浏览器模式）/ `dsh.client`（桌面端） | 往页面挂一个同源 `<script>`，不注入内联代码 |
+| 事件监听 | `session/event`、`session/disposed`、`subagent/start`，只读通知，不拦截、不修改 |
+
+三个路由都要先过鉴权，满足其一才放行：带 `token.txt` 里的随机令牌、同源 / 桌面端 `dsh-app://app` 的 Origin、
+或者根本没有 Origin（本机进程与同源 `fetch`）。带跨站 Origin 的请求一律 `403`（防止网页对 localhost 的 CSRF 读取）。
+
+**明确不申请、也不使用的高危能力**
+
+- 不注册任何工具 —— 模型看不到它，也调不到它
+- 不写会话、不改事件、不发消息、不 spawn / 中断任何 Agent
+- 不读凭据、登录令牌、API Key；不碰 `ctx.credentials`、`ctx.authorization`
+- 不执行 shell、不起子进程、不写包目录以外的任何路径
+- 不调用 `ctx.llm.stream()` —— 它自己不会产生任何模型费用
+
+**会不会看到我别的对话？** `sessionQuery` 是整个会话库的接口，但插件只做两件事：
+
+1. 用 `traceSession(当前会话)` 取**它自己的**子树（主会话 → 子智能体 → 队友）；
+2. 对子树里**已经结束**的子会话各读一次日志。
+
+不自己遍历会话库、不搜索、不读其它对话的正文（谱系由 DSH 的 `traceSession` 解析，插件只拿到这棵子树）。
+读进来的日志只在内存里累加 token 数字，既不出网、也不落盘。
+
 ## 隐私
 
 - **不读取**登录令牌、不碰 API Key
-- 余额只通过 DSH 自己的账号服务（`ctx.deepseekAccount.getBalance()`）读取
+- 余额只通过 DSH 自己的账号服务（`ctx.deepseekAccount.getBalance()`）读取，插件不直接连平台
 - **不向任何第三方发请求**；唯一的出站请求是每月一次抓官方价目页
 - 数据只在本机内存 + 浏览器 `localStorage`（竖条位置）里
 - 本地写入的文件：`debug.log`（诊断，可删）、`token.txt`（页面随机令牌）、`prices.auto.json`（价格缓存）
 
-## 兼容性
-
-- 需要 DSH 0.2.x（`@deepseek-ai/dsh-base` + `dsh-web-app` 组合）
-- 桌面端通过 `dsh.client` 客户端模块注入；纯浏览器模式（`dsh web`）通过 index 注入
-- 只在 Windows 的 desktop profile 上实测过
-
 ## 已知限制
 
-- 只统计**主会话**，不含子任务（subagent）的花费
-- 会话必须是 Host 内存里的 live session 才能统计；冷会话显示 `—`
+- 只统计**当前对话这一棵树**：主会话 + 它的子智能体 + 队友（及其子智能体），别的对话不计入
+- 子任务/队友的会话结束、甚至 DSH 重启之后，用量会从磁盘上的会话日志补算回来；只有那份日志被删掉才会丢
 - 法定节假日的高峰/空闲判断不准（会影响估算）
 
-## 开发
+## 卸载
+
+```bash
+dsh plugin --profile <profile> remove dsh-token-monitor
+```
+
+图形界面：**设置 → 插件 → `dsh-token-monitor` → 卸载**。卸载后重启一次 DSH，页面上的竖条会消失。
+
+## 仓库结构
 
 ```
 index.js            host 半：读余额、累加 usage、HTTP 路由、价格抓取
@@ -133,7 +215,18 @@ ui.js               悬浮窗本体：纯 DOM + Shadow DOM，无构建、无依�
 cordis.patch.yml    bundle 层：插入插件行
 config.json         默认配置
 test/smoke.mjs      假 ctx 的回归测试（npm test）
+test/rollup.mjs     任务级汇总（主会话 + 子任务 + 队友）的回归测试
 test/prices.mjs     拿真实官方页面验证价格解析（npm run test:prices）
+CHANGELOG.md        版本变更
+LICENSE             MIT
+```
+
+## 开发
+
+```bash
+node test/smoke.mjs     # host 半的回归（假 ctx，不需要跑 DSH）
+node test/rollup.mjs    # 任务级汇总口径（主会话 / 子任务 / 队友）
+npm run test:prices     # 抓真实官方页面验证价格解析
 ```
 
 ### 两个容易踩的坑
@@ -152,17 +245,16 @@ test/prices.mjs     拿真实官方页面验证价格解析（npm run test:price
 
 ## 发布到 GitHub
 
-```bash
-cd dsh-token-monitor
-git init
-git add .
-git commit -m "feat: dsh-token-monitor 1.0.0"
-git branch -M main
-git remote add origin https://github.com/Ta9y/dsh-token-monitor.git
-git push -u origin main
-```
+仓库用 REST API 推送（不需要装 git）：把 `release/<版本>/<包名>/` 当作一个提交推到 `main`，
+历史版本留在 `release/<旧版本>/`，不跟着上传。
 
-如果想换仓库地址，改 `package.json` 里的 `repository` / `homepage` / `bugs` 三处即可。
+```powershell
+# 1) 把 GitHub PAT（Contents: Read and write）写进仓库根的 .github-token
+# 2) 先离线自检：不联网、不需要令牌，只列出将要上传的文件并检查是否有运行时产物 / 凭据
+$env:GH_DRY = "1"; node tools/push-github.mjs
+# 3) 正式推送（提交信息默认 feat: dsh-token-monitor <版本>，版本取自 package.json）
+node tools/push-github.mjs
+```
 
 仓库建好后记得加 **Topics**（右侧 About 旁的齿轮）：
 
@@ -172,6 +264,6 @@ dsh-plugin  dsh  deepseek-harness  deepseek  plugin  token  cost  balance
 
 `dsh-plugin` 是检索 DSH 插件时最主要的标签。
 
-## License
+## 许可
 
 [MIT](LICENSE)

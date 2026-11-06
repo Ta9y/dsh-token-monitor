@@ -1,6 +1,6 @@
 {
   "name": "dsh-token-monitor",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Floating token & cost monitor for DeepSeek Harness: account balance, per-conversation token spend, and cost estimated with DeepSeek's official peak/off-peak rates.",
   "keywords": [
     "dsh-plugin",
@@ -46,6 +46,7 @@
   },
   "scripts": {
     "test": "node test/smoke.mjs",
+    "test:rollup": "node test/rollup.mjs",
     "test:prices": "node test/prices.mjs"
   },
   "repository": {
